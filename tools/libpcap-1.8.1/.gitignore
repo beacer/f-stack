@@ -1,0 +1,15 @@
+*.3pcap
+*.manmisc
+*.manfile
+*.so.*
+Makefile
+bpf_filter.c
+config.*
+grammar.c
+grammar.h
+net
+pcap-config
+pcap_version.h
+scanner.c
+scanner.h
+version.c

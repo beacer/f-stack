@@ -11,3 +11,4 @@ tags
 filenametags
 cscope*
 *.tar.gz
+.*.sw[a-z]

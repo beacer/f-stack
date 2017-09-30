@@ -446,6 +446,10 @@ PCAP_API int	bpf_validate(const struct bpf_insn *f, int len);
 PCAP_API char	*bpf_image(const struct bpf_insn *, int);
 PCAP_API void	bpf_dump(const struct bpf_program *, int);
 
+#if defined(FSTACK)
+PCAP_API int pcap_ff_init(int prog);
+#endif
+
 #if defined(_WIN32)
 
   /*

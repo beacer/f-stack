@@ -65,6 +65,8 @@
 
 #define MSG_RING_SIZE 32
 
+#define PCAP_RING_SIZE 32
+
 /*
  * Configurable number of RX/TX ring descriptors
  */
@@ -175,6 +177,9 @@ struct ff_msg_ring {
 
 static struct ff_msg_ring msg_ring[RTE_MAX_LCORE];
 static struct rte_mempool *message_pool;
+
+static struct rte_mempool *pcap_pool;
+static struct rte_ring *pcap_ring_rd;
 
 struct ff_dpdk_if_context {
     void *sc;
@@ -513,6 +518,41 @@ init_msg_ring(void)
     return 0;
 }
 
+static int init_pcap(void)
+{
+    unsigned socketid = lcore_conf.socket_id;
+    uint16_t i, nb_procs = ff_global_cfg.dpdk.nb_procs;
+
+    if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+        pcap_pool = rte_mempool_create(FF_PCAP_POOL,
+                                       PCAP_RING_SIZE * nb_procs,
+                                       sizeof(struct ff_pcap_pkt),
+                                       PCAP_RING_SIZE / 2, 0,
+                                       NULL, NULL, NULL, NULL,
+                                       socketid, 0);
+    } else {
+        pcap_pool = rte_mempool_lookup(FF_PCAP_POOL);
+    }
+
+    if (!pcap_pool) {
+        rte_panic("Create pcap mempool failed\n");
+    }
+
+    for (i = 0; i < nb_procs; i++) {
+        char ring_name[RTE_RING_NAMESIZE];
+
+        snprintf(ring_name, sizeof(ring_name), "%s%u", FF_PCAP_RING_RD, i);
+
+        pcap_ring_rd = create_ring(ring_name, PCAP_RING_SIZE, socketid,
+                                   RING_F_SP_ENQ | RING_F_SP_ENQ);
+        if (!pcap_ring_rd) {
+            rte_panic("Create ring::%s failed\n", ring_name);
+        }
+    }
+
+    return 0;
+}
+
 static int
 init_kni(void)
 {
@@ -810,6 +850,8 @@ ff_dpdk_init(int argc, char **argv)
     init_arp_ring();
 
     init_msg_ring();
+
+    init_pcap();
 
     enable_kni = ff_global_cfg.kni.enable;
     if (enable_kni) {

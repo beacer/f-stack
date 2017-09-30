@@ -79,6 +79,10 @@ YACC = @YACC@
 	@rm -f $@
 	$(CC) $(FULL_CFLAGS) -c $(srcdir)/$*.c
 
+ifeq (@V_PCAP@,fstack)
+include fstack.mk
+endif
+
 PSRC =	pcap-@V_PCAP@.c @USB_SRC@ @BT_SRC@ @BT_MONITOR_SRC@ @NETFILTER_SRC@ @DBUS_SRC@
 FSRC =  @V_FINDALLDEVS@
 SSRC =  @SSRC@

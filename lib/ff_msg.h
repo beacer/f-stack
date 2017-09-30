@@ -40,6 +40,7 @@ enum FF_MSG_TYPE {
     FF_IOCTL,
     FF_ROUTE,
     FF_TOP,
+    FF_PCAP,
 };
 
 struct ff_sysctl_args {
@@ -71,6 +72,20 @@ struct ff_top_args {
     unsigned long usr_tsc;
 };
 
+typedef enum ff_pcap_op {
+    FF_PCAP_START,
+    FF_PCAP_STOP,
+    FF_PCAP_STATS,
+} ff_pcap_op_t;
+
+struct ff_pcap_args {
+    ff_pcap_op_t        oper;
+    char                ifname[IFNAMSIZ];
+
+    /* statistics */
+    uint64_t            ifdrops; /* dropped by interface */
+};
+
 #define MAX_MSG_BUF_SIZE 10240
 
 /* structure of ipc msg */
@@ -88,6 +103,7 @@ struct ff_msg {
         struct ff_ioctl_args ioctl;
         struct ff_route_args route;
         struct ff_top_args top;
+        struct ff_pcap_args pcap;
     };
 } __attribute__((packed)) __rte_cache_aligned;
 

@@ -6125,6 +6125,15 @@ snf)
 	xxx_only=yes
 	;;
 
+fstack)
+	#
+	# --with-pcap=fstack is the only way to get here, and it means
+	# "fstack support but nothing else"
+	#
+	V_DEFS="$V_DEFS -DFSTACK_ONLY"
+	xxx_only=yes
+    ;;
+
 null)
 	{ $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: cannot determine packet capture interface" >&5
 $as_echo "$as_me: WARNING: cannot determine packet capture interface" >&2;}
