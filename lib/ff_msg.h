@@ -27,6 +27,7 @@
 #ifndef _FF_MSG_H_
 #define _FF_MSG_H_
 
+#include <net/if.h>
 #include <rte_memory.h>
 
 #define FF_MSG_RING_IN  "ff_msg_ring_in_"
@@ -82,7 +83,7 @@ struct ff_pcap_args {
     ff_pcap_op_t        oper;
     char                ifname[IFNAMSIZ];
 
-    /* statistics */
+    /* FF_PCAP_STATS only */
     uint64_t            ifdrops; /* dropped by interface */
 };
 

@@ -27,77 +27,103 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "ff_dpdk_if.h"
 #include "ff_dpdk_pcap.h"
 
-struct pcap_file_header {
-    uint32_t magic;
-    u_short version_major;
-    u_short version_minor;
-    int32_t thiszone;        /* gmt to local correction */
-    uint32_t sigfigs;        /* accuracy of timestamps */
-    uint32_t snaplen;        /* max length saved portion of each pkt */
-    uint32_t linktype;       /* data link type (LINKTYPE_*) */
-};
+#define PCAP_RING_SIZE      32      /* max num pkts queued for one proc */
+#define PCAP_DEF_OFFSET     4       /* for 802.1q vlan tag */
 
-struct pcap_pkthdr {
-    uint32_t sec;            /* time stamp */
-    uint32_t usec;           /* struct timeval time_t, in linux64: 8*2=16, in cap: 4 */
-    uint32_t caplen;         /* length of portion present */
-    uint32_t len;            /* length this packet (off wire) */
-};
+static struct rte_mempool *pcap_pool;
+static struct rte_ring *pcap_ring_rd;
 
-int
-ff_enable_pcap(const char* dump_path)
+int ff_pcap_init(int numa_id, int nb_procs, int proc_id)
 {
-    FILE* fp = fopen(dump_path, "w");
-    if (fp == NULL) { 
-        rte_exit(EXIT_FAILURE, "Cannot open pcap dump path: %s\n", dump_path);
-        return -1;
+    char name[RTE_RING_NAMESIZE];
+
+    /* get global pcap pool */
+    if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+        pcap_pool = rte_mempool_create(FF_PCAP_POOL,
+                                       PCAP_RING_SIZE * nb_procs,
+                                       sizeof(struct ff_pcap_pkt),
+                                       PCAP_RING_SIZE / 2, 0,
+                                       NULL, NULL, NULL, NULL,
+                                       numa_id, 0);
+    } else {
+        pcap_pool = rte_mempool_lookup(FF_PCAP_POOL);
     }
 
-    struct pcap_file_header pcap_file_hdr;
-    void* file_hdr = &pcap_file_hdr;
+    if (!pcap_pool)
+        rte_panic("Create pcap mempool failed\n");
 
-    pcap_file_hdr.magic = 0xA1B2C3D4;
-    pcap_file_hdr.version_major = 0x0002;
-    pcap_file_hdr.version_minor = 0x0004;
-    pcap_file_hdr.thiszone = 0x00000000;
-    pcap_file_hdr.sigfigs = 0x00000000;
-    pcap_file_hdr.snaplen = 0x0000FFFF;  //65535
-    pcap_file_hdr.linktype = 0x00000001; //DLT_EN10MB, Ethernet (10Mb)
+    /* per-proc ring */
+    snprintf(name, sizeof(name), "%s%u", FF_PCAP_RING_RD, proc_id);
+    pcap_ring_rd = rte_ring_lookup(name);
 
-    fwrite(file_hdr, sizeof(struct pcap_file_header), 1, fp);
-    fclose(fp);
+    if (!pcap_ring_rd) {
+        pcap_ring_rd = rte_ring_create(name, PCAP_RING_SIZE, numa_id,
+                                       RING_F_SP_ENQ | RING_F_SP_ENQ);
+
+        if (!pcap_ring_rd)
+            rte_panic("Create pcap ring: %s failed\n", name);
+    }
 
     return 0;
 }
 
 int
-ff_dump_packets(const char* dump_path, struct rte_mbuf* pkt)
+ff_pcap_dump_pkt(struct rte_mbuf *mbuf, uint8_t portid)
 {
-    FILE* fp = fopen(dump_path, "a");
-    if (fp == NULL) {
-        return -1;
+    int ifindex = ff_if_idtoindex(portid);
+    struct ff_pcap_pkt *pkt;
+    struct timespec tp;
+    struct rte_mbuf *seg;
+    int left, err;
+
+    if (unlikely(!pcap_pool || !pcap_ring_rd))
+        return -EPIPE;
+
+    if (unlikely(ifindex <= 0))
+        return -EINVAL;
+
+    if (unlikely(rte_ring_full(pcap_ring_rd)))
+        return -ENOBUFS; /* avoid copy if ring is already full */
+
+    if (rte_mempool_get(pcap_pool, (void **)&pkt) != 0)
+        return -ENOENT;
+    memset(pkt, 0, sizeof(*pkt));
+
+    pkt->ifindex = ifindex;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    pkt->ts.tv_sec = tp.tv_sec;
+    pkt->ts.tv_usec = tp.tv_nsec / 1000;
+    if (mbuf->ol_flags & PKT_RX_VLAN_STRIPPED) {
+        pkt->vlan = 1;
+        pkt->vlan_tci = mbuf->vlan_tci;
     }
 
-    struct pcap_pkthdr pcap_hdr;
-    void* hdr = &pcap_hdr;
+    pkt->pkt_len = 0;
+    pkt->offset = PCAP_DEF_OFFSET;
+    left = sizeof(pkt->buffer) - pkt->offset;
 
-    struct timeval ts;
-    gettimeofday(&ts, NULL);
-    pcap_hdr.sec = ts.tv_sec;
-    pcap_hdr.usec = ts.tv_usec;
-    pcap_hdr.caplen = pkt->pkt_len;
-    pcap_hdr.len = pkt->pkt_len;
-    fwrite(hdr, sizeof(struct pcap_pkthdr), 1, fp);
+    /* copy all mbuf segments util no space left. */
+    for (seg = mbuf; seg; seg = mbuf->next) {
+        if (left < seg->data_len) {
+            pkt->strip = 1; /* hint */
+            break;
+        }
 
-    while(pkt != NULL) {
-        fwrite(rte_pktmbuf_mtod(pkt, char*), pkt->data_len, 1, fp);
-        pkt = pkt->next;
+        memcpy(pkt->buffer + pkt->pkt_len,
+               rte_pktmbuf_mtod(seg, void *), seg->data_len);
+
+        pkt->pkt_len += seg->data_len;
+        left -= seg->data_len;
     }
 
-    fclose(fp);
+    err = rte_ring_enqueue(pcap_ring_rd, pkt);
+    if (err != 0 && err != -EDQUOT) {
+        rte_mempool_put(pcap_pool, pkt);
+        return -ENOBUFS;
+    }
 
     return 0;
 }
-

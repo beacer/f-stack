@@ -61,5 +61,13 @@ int ff_dpdk_if_send(struct ff_dpdk_if_context* ctx, void *buf, int total);
 
 void ff_dpdk_pktmbuf_free(void *m);
 
+/**
+ * helper to translation among:
+ *   - DPDK portid      start from zero.
+ *   - Unix ifindex     start from 1.
+ *   - Unix ifname
+ */
+int ff_if_idtoindex(uint8_t portid);
+int ff_if_nametoid(const char *ifname);
 
 #endif /* ifndef _FSTACK_DPDK_IF_H */

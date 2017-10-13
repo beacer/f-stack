@@ -420,3 +420,16 @@ ff_veth_softc_to_hostc(void *softc)
     return (void *)sc->host_ctx;
 }
 
+int
+ff_veth_ifindex(void *softc)
+{
+    struct ff_veth_softc *sc = (struct ff_veth_softc *)softc;
+    return sc->ifp->if_index;
+}
+
+const char *
+ff_veth_ifname(void *softc)
+{
+    struct ff_veth_softc *sc = (struct ff_veth_softc *)softc;
+    return sc->host_ifname;
+}

@@ -45,5 +45,7 @@ void ff_veth_process_packet(void *arg, void *m);
 
 void *ff_veth_softc_to_hostc(void *softc);
 
+int ff_veth_ifindex(void *softc);
+const char *ff_veth_ifname(void *softc);
 
 #endif /* ifndef _FSTACK_VETH_H */

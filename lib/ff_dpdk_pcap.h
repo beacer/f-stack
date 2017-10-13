@@ -30,8 +30,24 @@
 #include <rte_config.h>
 #include <rte_mbuf.h>
 
-int ff_enable_pcap(const char* dump_path);
-int ff_dump_packets(const char* dump_path, struct rte_mbuf *pkt);
+#define FF_PCAP_RING_RD     "ff_pcap_ring_rd_" /* read by pcap app */
+#define FF_PCAP_POOL        "ff_pcap_pool"
 
+#define FF_PCAP_MAX_BUF     65536
+
+struct ff_pcap_pkt {
+    unsigned int    ifindex;    /* bsd ifindex */
+    struct timeval  ts;
+    uint8_t         vlan:1,     /* 802.1q tag present */
+                    strip:1,    /* packet stripped due to buf not enough */
+                    __unused:6;
+    uint16_t        vlan_tci;   /* host byte order, valid if @vlan is set */
+    uint16_t        pkt_len;
+    uint16_t        offset;     /* data offset, may leave some head room. */
+    uint8_t         buffer[FF_PCAP_MAX_BUF];
+} __attribute__((packed)) __rte_cache_aligned;
+
+int ff_pcap_init(int numa_id, int nb_procs, int proc_id);
+int ff_pcap_dump_pkt(struct rte_mbuf *mbuf, uint8_t portid);
 
 #endif /* ifndef _FSTACK_DPDK_PCAP_H */

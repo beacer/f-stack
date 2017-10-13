@@ -24,6 +24,7 @@
  *
  */
 #include <assert.h>
+#include <stdbool.h>
 
 #include <rte_common.h>
 #include <rte_byteorder.h>
@@ -64,8 +65,6 @@
 #define ARP_RING_SIZE 2048
 
 #define MSG_RING_SIZE 32
-
-#define PCAP_RING_SIZE 32
 
 /*
  * Configurable number of RX/TX ring descriptors
@@ -157,7 +156,7 @@ struct lcore_conf {
     uint16_t tx_port_id[RTE_MAX_ETHPORTS];
     uint16_t tx_queue_id[RTE_MAX_ETHPORTS];
     struct mbuf_table tx_mbufs[RTE_MAX_ETHPORTS];
-    char *pcap[RTE_MAX_ETHPORTS];
+    bool pcap[RTE_MAX_ETHPORTS]; /* to capture on ports or not */
 } __rte_cache_aligned;
 
 static struct lcore_conf lcore_conf;
@@ -177,9 +176,6 @@ struct ff_msg_ring {
 
 static struct ff_msg_ring msg_ring[RTE_MAX_LCORE];
 static struct rte_mempool *message_pool;
-
-static struct rte_mempool *pcap_pool;
-static struct rte_ring *pcap_ring_rd;
 
 struct ff_dpdk_if_context {
     void *sc;
@@ -338,7 +334,6 @@ init_lcore_conf(void)
         lcore_conf.tx_port_id[lcore_conf.nb_tx_port] = port_id;
         lcore_conf.nb_tx_port++;
 
-        lcore_conf.pcap[port_id] = pconf->pcap;
         lcore_conf.nb_queue_list[port_id] = pconf->nb_lcores;
     }
 
@@ -513,41 +508,6 @@ init_msg_ring(void)
             MSG_RING_SIZE, socketid, RING_F_SP_ENQ | RING_F_SC_DEQ);
         if (msg_ring[i].ring[1] == NULL)
             rte_panic("create ring::%s failed!\n", msg_ring[i].ring_name[0]);
-    }
-
-    return 0;
-}
-
-static int init_pcap(void)
-{
-    unsigned socketid = lcore_conf.socket_id;
-    uint16_t i, nb_procs = ff_global_cfg.dpdk.nb_procs;
-
-    if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
-        pcap_pool = rte_mempool_create(FF_PCAP_POOL,
-                                       PCAP_RING_SIZE * nb_procs,
-                                       sizeof(struct ff_pcap_pkt),
-                                       PCAP_RING_SIZE / 2, 0,
-                                       NULL, NULL, NULL, NULL,
-                                       socketid, 0);
-    } else {
-        pcap_pool = rte_mempool_lookup(FF_PCAP_POOL);
-    }
-
-    if (!pcap_pool) {
-        rte_panic("Create pcap mempool failed\n");
-    }
-
-    for (i = 0; i < nb_procs; i++) {
-        char ring_name[RTE_RING_NAMESIZE];
-
-        snprintf(ring_name, sizeof(ring_name), "%s%u", FF_PCAP_RING_RD, i);
-
-        pcap_ring_rd = create_ring(ring_name, PCAP_RING_SIZE, socketid,
-                                   RING_F_SP_ENQ | RING_F_SP_ENQ);
-        if (!pcap_ring_rd) {
-            rte_panic("Create ring::%s failed\n", ring_name);
-        }
     }
 
     return 0;
@@ -792,11 +752,6 @@ init_port_start(void)
                 printf("set port %u to promiscuous mode error\n", port_id);
             }
         }
-
-        /* Enable pcap dump */
-        if (pconf->pcap) {
-            ff_enable_pcap(pconf->pcap);
-        }
     }
 
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
@@ -851,7 +806,8 @@ ff_dpdk_init(int argc, char **argv)
 
     init_msg_ring();
 
-    init_pcap();
+    ff_pcap_init(lcore_conf.socket_id, ff_global_cfg.dpdk.nb_procs,
+                 ff_global_cfg.dpdk.proc_id);
 
     enable_kni = ff_global_cfg.kni.enable;
     if (enable_kni) {
@@ -944,8 +900,8 @@ process_packets(uint8_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
     for (i = 0; i < count; i++) {
         struct rte_mbuf *rtem = bufs[i];
 
-        if (unlikely(qconf->pcap[port_id] != NULL)) {
-            ff_dump_packets(qconf->pcap[port_id], rtem);
+        if (unlikely(qconf->pcap[port_id])) {
+            ff_pcap_dump_pkt(rtem, port_id);
         }
 
         void *data = rte_pktmbuf_mtod(rtem, void*);
@@ -1071,6 +1027,44 @@ handle_top_msg(struct ff_msg *msg, uint16_t proc_id)
 }
 
 static inline void
+handle_pcap_msg(struct ff_msg *msg, uint16_t proc_id)
+{
+    int portid;
+    struct rte_eth_stats stats;
+
+    portid = ff_if_nametoid(msg->pcap.ifname);
+    if (!rte_eth_dev_is_valid_port(portid)) {
+        msg->result = ENODEV;
+        goto reply;
+    }
+
+    switch (msg->pcap.oper) {
+    case FF_PCAP_START:
+        lcore_conf.pcap[portid] = 1;
+        break;
+    case FF_PCAP_STOP:
+        lcore_conf.pcap[portid] = 0;
+        break;
+    case FF_PCAP_STATS:
+        if (rte_eth_stats_get(portid, &stats) != 0) {
+            msg->result = EINVAL;
+            goto reply;
+        }
+
+        msg->pcap.ifdrops = stats.imissed;
+        break;
+    default:
+        msg->result = ENOTSUP;
+        goto reply;
+    }
+
+    msg->result = 0;
+
+reply:
+    rte_ring_enqueue(msg_ring[proc_id].ring[1], msg);
+}
+
+static inline void
 handle_default_msg(struct ff_msg *msg, uint16_t proc_id)
 {
     msg->result = EINVAL;
@@ -1092,6 +1086,9 @@ handle_msg(struct ff_msg *msg, uint16_t proc_id)
             break;
         case FF_TOP:
             handle_top_msg(msg, proc_id);
+            break;
+        case FF_PCAP:
+            handle_pcap_msg(msg, proc_id);
             break;
         default:
             handle_default_msg(msg, proc_id);
@@ -1123,10 +1120,10 @@ send_burst(struct lcore_conf *qconf, uint16_t n, uint8_t port)
     queueid = qconf->tx_queue_id[port];
     m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
 
-    if (unlikely(qconf->pcap[port] != NULL)) {
+    if (unlikely(qconf->pcap[port])) {
         uint16_t i;
         for (i = 0; i < n; i++) {
-            ff_dump_packets(qconf->pcap[port], m_table[i]);
+            ff_pcap_dump_pkt(m_table[i], port);
         }
     }
 
@@ -1461,4 +1458,50 @@ ff_rss_check(void *softc, uint32_t saddr, uint32_t daddr,
         default_rsskey_40bytes, datalen, data);
 
     return ((hash & (reta_size - 1)) % nb_queues) == queueid;
+}
+
+/**
+ * return positive ifindex or negative on error.
+ */
+int
+ff_if_idtoindex(uint8_t portid)
+{
+    struct ff_dpdk_if_context *ctx;
+
+    if (portid >= RTE_MAX_ETHPORTS)
+        return -EINVAL;
+
+    ctx = veth_ctx[portid];
+    if (!ctx || !ctx->sc)
+        return -ENODEV;
+
+    return ff_veth_ifindex(ctx->sc);
+}
+
+/**
+ * return (>= 0 and < RTE_MAX_ETHPORTS) for portid
+ * and negative on error.
+ */
+int
+ff_if_nametoid(const char *ifname)
+{
+    int portid;
+
+    for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
+        struct ff_dpdk_if_context *ctx;
+        struct ff_veth_softc *sc;
+
+        ctx = veth_ctx[portid];
+        if (!ctx)
+            continue;
+
+        sc = (struct ff_veth_softc *)ctx->sc;
+        if (!sc)
+            continue;
+
+        if (strcmp(ff_veth_ifname(sc), ifname) == 0)
+            return portid;
+    }
+
+    return -1;
 }

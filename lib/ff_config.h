@@ -52,7 +52,6 @@ struct ff_port_cfg {
     char *netmask;
     char *broadcast;
     char *gateway;
-    char *pcap;
 
     int nb_lcores;
     uint16_t lcore_list[DPDK_MAX_LCORE];
